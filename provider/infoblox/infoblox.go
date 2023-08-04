@@ -62,6 +62,7 @@ type StartupConfig struct {
 	NameRegEx     string
 	CreatePTR     bool
 	CacheDuration int
+	CreateZones   bool
 }
 
 // ProviderConfig implements the DNS provider for Infoblox.
@@ -74,6 +75,7 @@ type ProviderConfig struct {
 	dryRun        bool
 	fqdnRegEx     string
 	createPTR     bool
+	createZones   bool
 	cacheDuration int
 }
 
@@ -177,6 +179,7 @@ func NewInfobloxProvider(ibStartupCfg StartupConfig) (*ProviderConfig, error) {
 		view:          ibStartupCfg.View,
 		fqdnRegEx:     ibStartupCfg.FQDNRegEx,
 		createPTR:     ibStartupCfg.CreatePTR,
+		createZones:   ibStartupCfg.CreateZones,
 		cacheDuration: ibStartupCfg.CacheDuration,
 	}
 
@@ -465,9 +468,19 @@ func (p *ProviderConfig) mapChanges(zones []ibclient.ZoneAuth, changes *plan.Cha
 	mapChange := func(changeMap infobloxChangeMap, change *endpoint.Endpoint) {
 		zone := p.findZone(zones, change.DNSName)
 		if zone == nil {
-			logrus.Debugf("Ignoring changes to '%s' because a suitable Infoblox DNS zone was not found.", change.DNSName)
-			return
+			if p.createZones {
+				var err error
+				zone, err = p.createZoneAuth(p.getZoneFromName(change.DNSName))
+				if err != nil {
+					logrus.WithError(err).Debugf("Failed to create necessary Infoblox zones for '%s'.", change.DNSName)
+					return
+				}
+			} else {
+				logrus.Debugf("Ignoring changes to '%s' because a suitable Infoblox DNS zone was not found.", change.DNSName)
+				return
+			}
 		}
+
 		// Ensure the record type is suitable
 		changeMap[zone.Fqdn] = append(changeMap[zone.Fqdn], change)
 
@@ -516,6 +529,33 @@ func (p *ProviderConfig) findZone(zones []ibclient.ZoneAuth, name string) *ibcli
 		}
 	}
 	return result
+}
+
+func (p *ProviderConfig) getZoneFromName(name string) string {
+	zone := name
+	segments := strings.Split(name, ".")
+	if len(segments) > 1 {
+		zone = strings.Join(segments[1:], ".")
+	}
+	return zone
+}
+
+func (p *ProviderConfig) createZoneAuth(name string) (*ibclient.ZoneAuth, error) {
+	var result *ibclient.ZoneAuth
+
+	obj := ibclient.NewZoneAuth(ibclient.ZoneAuth{
+		Fqdn: name,
+	})
+	_, err := p.client.CreateObject(obj)
+	if err != nil {
+		logrus.Errorf(
+			"Failed to create DNS zone '%s': %v",
+			obj.Fqdn,
+			err,
+		)
+	}
+
+	return result, nil
 }
 
 func (p *ProviderConfig) findReverseZone(zones []ibclient.ZoneAuth, name string) *ibclient.ZoneAuth {
